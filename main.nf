@@ -1,11 +1,11 @@
 #!/usr/bin/env nextflow
 /*
 ========================================================================================
-                         nf-core/exomedepth
+                         PhilPalmer/exomedepth
 ========================================================================================
- nf-core/exomedepth Analysis Pipeline.
+ PhilPalmer/exomedepth Analysis Pipeline.
  #### Homepage / Documentation
- https://github.com/nf-core/exomedepth
+ https://github.com/PhilPalmer/exomedepth
 ----------------------------------------------------------------------------------------
 */
 
@@ -13,25 +13,30 @@
 def helpMessage() {
     log.info"""
     =========================================
-     nf-core/exomedepth v${manifest.pipelineVersion}
+     PhilPalmer/exomedepth //v
     =========================================
+    Description:
+    Exome Depth Per-Chromosome Analysis
+
+    Runs ExomeDepth on a single chromosome for a set of BAM files.
+    NB: each BAM file is assumed to contain a single sample. Multisample BAM files are not supported.
+
     Usage:
 
     The typical command for running the pipeline is as follows:
 
-    nextflow run nf-core/exomedepth --reads '*_R{1,2}.fastq.gz' -profile standard,docker
+    nextflow run PhilPalmer/exomedepth --target_bed bedfile --chr 20 --ref reference.fasta -profile standard,docker
 
     Mandatory arguments:
-      --reads                       Path to input data (must be surrounded with quotes)
-      --genome                      Name of iGenomes reference
-      -profile                      Configuration profile to use. Can use multiple (comma separated)
-                                    Available: standard, conda, docker, singularity, awsbatch, test
+      --target_bed                  BED file containing target regions to analyse (eg: exome design covered regions)
+      --ref                         Genome reference in FASTA format, indexed using samtools faindex
+      --bam_folder                  Path to folder containing bam files
 
     Options:
-      --singleEnd                   Specifies that the input is single end reads
-
-    References                      If not specified in the configuration file or you wish to overwrite any of the references.
-      --fasta                       Path to Fasta reference
+      -profile                      Available: standard, conda, docker, singularity, awsbatch, test
+      --transition_probability      0.0001
+      --msg                         Using Exome Depth transition probability //transition_probability
+      --help                        Display help message
 
     Other options:
       --outdir                      The output directory where the results will be saved
@@ -55,69 +60,33 @@ if (params.help){
 }
 
 // Configurable variables
-params.name = false
-params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
-params.multiqc_config = "$baseDir/conf/multiqc_config.yaml"
-params.email = false
-params.plaintext_email = false
+params.target_bed = 'data/genes_hg19.bed'
+params.ref = 'data/test.fasta'
+target_bed = file(params.target_bed)
+ref = file(params.ref)
+//chrs = [1..22,'X']
+chrs = [ 'chr1', 'chr2', 'chrM' ]
+params.transition_probability = 0.0001
+transition_probability = params.transition_probability
 
-multiqc_config = file(params.multiqc_config)
-output_docs = file("$baseDir/docs/output.md")
 
 // Validate inputs
-if ( params.fasta ){
-    fasta = file(params.fasta)
-    if( !fasta.exists() ) exit 1, "Fasta file not found: ${params.fasta}"
-}
-// AWSBatch sanity checking
-if(workflow.profile == 'awsbatch'){
-    if (!params.awsqueue || !params.awsregion) exit 1, "Specify correct --awsqueue and --awsregion parameters on AWSBatch!"
-    if (!workflow.workDir.startsWith('s3') || !params.outdir.startsWith('s3')) exit 1, "Specify S3 URLs for workDir and outdir parameters on AWSBatch!"
-}
-//
-// NOTE - THIS IS NOT USED IN THIS PIPELINE, EXAMPLE ONLY
-// If you want to use the above in a process, define the following:
-//   input:
-//   file fasta from fasta
-//
-
-
-// Has the run name been specified by the user?
-//  this has the bonus effect of catching both -name and --name
-custom_runName = params.name
-if( !(workflow.runName ==~ /[a-z]+_[a-z]+/) ){
-  custom_runName = workflow.runName
+if ( params.target_bed ){
+    target_bed = file(params.target_bed)
+    if( !target_bed.exists() ) exit 1, "Target bed file not found: ${params.target_bed}"
 }
 
-// Check workDir/outdir paths to be S3 buckets if running on AWSBatch
-// related: https://github.com/nextflow-io/nextflow/issues/813
-if( workflow.profile == 'awsbatch') {
-    if(!workflow.workDir.startsWith('s3:') || !params.outdir.startsWith('s3:')) exit 1, "Workdir or Outdir not on S3 - specify S3 Buckets for each to run on AWSBatch!"
-}
 
-/*
- * Create a channel for input read files
- */
- if(params.readPaths){
-     if(params.singleEnd){
-         Channel
-             .from(params.readPaths)
-             .map { row -> [ row[0], [file(row[1][0])]] }
-             .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-             .into { read_files_fastqc; read_files_trimming }
-     } else {
-         Channel
-             .from(params.readPaths)
-             .map { row -> [ row[0], [file(row[1][0]), file(row[1][1])]] }
-             .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-             .into { read_files_fastqc; read_files_trimming }
-     }
- } else {
-     Channel
-         .fromFilePairs( params.reads, size: params.singleEnd ? 1 : 2 )
-         .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --singleEnd on the command line." }
-         .into { read_files_fastqc; read_files_trimming }
- }
+
+/*--------------------------------------------------
+  Bam input files
+  The input must be a path to a folder containing multiple bam files
+---------------------------------------------------*/
+params.bam_folder="data"
+params.bam_file_prefix="*"
+
+
+Channel.fromPath("${params.bam_folder}/${params.bam_file_prefix}*.bam").map{ file -> tuple(file.name, file) }.set{bamChannel}
 
 
 // Header log info
@@ -128,220 +97,130 @@ log.info """=======================================================
     | \\| |       \\__, \\__/ |  \\ |___     \\`-._,-`-,
                                           `._,._,\'
 
-nf-core/exomedepth v${manifest.pipelineVersion}"
+nf-core/exomedepth
 ======================================================="""
 def summary = [:]
 summary['Pipeline Name']  = 'nf-core/exomedepth'
-summary['Pipeline Version'] = manifest.pipelineVersion
-summary['Run Name']     = custom_runName ?: workflow.runName
-summary['Reads']        = params.reads
-summary['Fasta Ref']    = params.fasta
-summary['Data Type']    = params.singleEnd ? 'Single-End' : 'Paired-End'
-summary['Max Memory']   = params.max_memory
-summary['Max CPUs']     = params.max_cpus
-summary['Max Time']     = params.max_time
-summary['Output dir']   = params.outdir
-summary['Working dir']  = workflow.workDir
-summary['Container Engine'] = workflow.containerEngine
-if(workflow.containerEngine) summary['Container'] = workflow.container
-summary['Current home']   = "$HOME"
-summary['Current user']   = "$USER"
-summary['Current path']   = "$PWD"
-summary['Working dir']    = workflow.workDir
-summary['Output dir']     = params.outdir
-summary['Script dir']     = workflow.projectDir
-summary['Config Profile'] = workflow.profile
-if(workflow.profile == 'awsbatch'){
-   summary['AWS Region'] = params.awsregion
-   summary['AWS Queue'] = params.awsqueue
-}
-if(params.email) summary['E-mail Address'] = params.email
+summary['Target bed']    = params.target_bed
+summary['Fasta Ref']    = params.ref
+summary['Bams']    = "${params.bam_folder}/${params.bam_file_prefix}*.bam"
 log.info summary.collect { k,v -> "${k.padRight(15)}: $v" }.join("\n")
 log.info "========================================="
-
-
-def create_workflow_summary(summary) {
-
-    def yaml_file = workDir.resolve('workflow_summary_mqc.yaml')
-    yaml_file.text  = """
-    id: 'nf-core-exomedepth-summary'
-    description: " - this information is collected when the pipeline is started."
-    section_name: 'nf-core/exomedepth Workflow Summary'
-    section_href: 'https://github.com/nf-core/exomedepth'
-    plot_type: 'html'
-    data: |
-        <dl class=\"dl-horizontal\">
-${summary.collect { k,v -> "            <dt>$k</dt><dd><samp>${v ?: '<span style=\"color:#999999;\">N/A</a>'}</samp></dd>" }.join("\n")}
-        </dl>
-    """.stripIndent()
-
-   return yaml_file
-}
-
-
+Channel
 /*
- * Parse software version numbers
+ * STEP 1 - Produce ExomeDepth tsv file for each chromosome
  */
-process get_software_versions {
-
-    output:
-    file 'software_versions_mqc.yaml' into software_versions_yaml
-
-    script:
-    """
-    echo $manifest.pipelineVersion > v_pipeline.txt
-    echo $workflow.nextflow.version > v_nextflow.txt
-    fastqc --version > v_fastqc.txt
-    multiqc --version > v_multiqc.txt
-    scrape_software_versions.py > software_versions_mqc.yaml
-    """
-}
-
-
-
-/*
- * STEP 1 - FastQC
- */
-process fastqc {
-    tag "$name"
-    publishDir "${params.outdir}/fastqc", mode: 'copy',
-        saveAs: {filename -> filename.indexOf(".zip") > 0 ? "zips/$filename" : "$filename"}
+process exomedepth{
+    publishDir "${params.outdir}/ExomeDepth", mode: 'copy'
 
     input:
-    set val(name), file(reads) from read_files_fastqc
+    file target_bed from target_bed
+    set val(name), file(bam) from bamChannel
+    each chr from chrs
+    file ref
 
     output:
-    file "*_fastqc.{zip,html}" into fastqc_results
+    //file "exome_depth.${chr}.tsv" into records
+    set val(chr), file("exome_depth${chr}.tsv") into records
 
     script:
     """
-    fastqc -q $reads
+    #!/usr/bin/env Rscript
+
+
+    source("https://bioconductor.org/biocLite.R")
+    biocLite("Rsamtools")
+
+    library(ExomeDepth)
+    library(Rsamtools)
+    read.bed = function(f) {
+      read.table(f, col.names=c("chr","start","end","id"), fill=1)
+    }
+    # Reference sequence
+    hg19.fasta = "$ref"
+    # Read the target / covered region
+    print("Reading target regions for $chr from $target_bed")
+    chr.covered = read.bed(pipe("grep '$chr[^0-9]' $target_bed"))
+    # ExomeDepth wants the columns named differently
+    chr.covered = data.frame(
+        chromosome=chr.covered\$chr,
+        start=chr.covered\$start,
+        end=chr.covered\$end,
+        name=paste(chr.covered\$chr,chr.covered\$start,chr.covered\$end,sep="-")
+    )
+    # BAM files are the primary input - convert to R vector
+    bam.files = c('${bam}')
+    all.samples = sapply(bam.files, function(file.name) {
+        # Scan the bam header and parse out the sample name from the first read group
+        read.group.info = strsplit(scanBamHeader(file.name)[[1]]\$text[["@RG"]],":")
+        names(read.group.info) = sapply(read.group.info, function(field) field[[1]])
+        return(read.group.info\$SM[[2]])
+    })
+    print(sprintf("Processing %d samples",length(all.samples)))
+    # Finally we can call ExomeDepth
+    bam.counts <- getBamCounts(bed.frame = chr.covered,
+                              bam.files = bam.files,
+                              include.chr = F,
+                              referenceFasta = hg19.fasta)
+    print("Successfully counted reads in BAM files")
+    # Note: at this point bam.counts has column names reflecting the
+    # file names => convert to actual sample names which is more convenient
+    colnames(bam.counts) = c("GC", all.samples)
+    # Problem: sample names starting with numbers get mangled. So convert them back,
+    # but ignore the first column which is actually the GC percentage
+    all.samples = colnames(bam.counts)[-1]
+    for(test.sample in all.samples) {
+        print(sprintf("Processing sample %s", test.sample))
+        reference.samples = all.samples[-match(test.sample, all.samples)]
+        bam.counts.df = as.data.frame(bam.counts[,reference.samples])[,-1:-6]
+        test.sample.counts = bam.counts[,test.sample][[1]]
+        print(sprintf("Selecting reference set for %s ...", test.sample ))
+        reference = select.reference.set(
+                                 test.counts = bam.counts[,test.sample][[1]],
+                                 reference.counts = as.matrix(as.data.frame(bam.counts[,reference.samples])[,-1:-6]),
+                                 bin.length = chr.covered\$end - chr.covered\$start
+                                )
+        # Get counts just for the reference set
+        reference.counts = apply(bam.counts.df[,reference\$reference.choice,drop=F],1,sum)
+        print(sprintf("Creating ExomeDepth object ..."))
+        ed = new("ExomeDepth",
+                      test = test.sample.counts,
+                      reference = reference.counts,
+                      formula = "cbind(test, reference) ~ 1")
+        print(sprintf("Calling CNVs ..."))
+        found.cnvs = CallCNVs(x = ed,
+                                transition.probability = $transition_probability,
+                                chromosome = chr.covered\$chromosome,
+                                start = chr.covered\$start,
+                                end = chr.covered\$end,
+                                name = chr.covered\$name)
+        results = found.cnvs@CNV.calls
+        results\$sample = rep(test.sample, nrow(results))
+        print(sprintf("Writing %d results to exome_depth.${chr}.tsv ...", nrow(results)))
+        write.table(file="exome_depth.${chr}.tsv",
+                    x=results,
+                    row.names=F,
+                    append=T)
+    }
+    print("Finished")
     """
 }
 
-
-
 /*
- * STEP 2 - MultiQC
+ * STEP 2 - Merge results from multiple ExomeDepth analyses together
  */
-process multiqc {
-    publishDir "${params.outdir}/MultiQC", mode: 'copy'
+process merge {
+    publishDir "${params.outdir}/Merge", mode: 'copy'
 
     input:
-    file multiqc_config
-    file ('fastqc/*') from fastqc_results.collect()
-    file ('software_versions/*') from software_versions_yaml
-    file workflow_summary from create_workflow_summary(summary)
+    //file (chrdepth) from records
+    set val(chr), file(rec) from records
 
     output:
-    file "*multiqc_report.html" into multiqc_report
-    file "*_data"
-
-    script:
-    rtitle = custom_runName ? "--title \"$custom_runName\"" : ''
-    rfilename = custom_runName ? "--filename " + custom_runName.replaceAll('\\W','_').replaceAll('_+','_') + "_multiqc_report" : ''
-    """
-    multiqc -f $rtitle $rfilename --config $multiqc_config .
-    """
-}
-
-
-
-/*
- * STEP 3 - Output Description HTML
- */
-process output_documentation {
-    tag "$prefix"
-    publishDir "${params.outdir}/Documentation", mode: 'copy'
-
-    input:
-    file output_docs
-
-    output:
-    file "results_description.html"
+    file ('exome_depth.cnvs.tsv')
 
     script:
     """
-    markdown_to_html.r $output_docs results_description.html
+    cat $rec | grep -v '^"sample"' | awk '{ if(NR==1 || \$1 != "\\"start.p\\"") print \$0 }' > $exome_depth.cnvs.tsv
     """
-}
-
-
-
-/*
- * Completion e-mail notification
- */
-workflow.onComplete {
-
-    // Set up the e-mail variables
-    def subject = "[nf-core/exomedepth] Successful: $workflow.runName"
-    if(!workflow.success){
-      subject = "[nf-core/exomedepth] FAILED: $workflow.runName"
-    }
-    def email_fields = [:]
-    email_fields['version'] = manifest.pipelineVersion
-    email_fields['runName'] = custom_runName ?: workflow.runName
-    email_fields['success'] = workflow.success
-    email_fields['dateComplete'] = workflow.complete
-    email_fields['duration'] = workflow.duration
-    email_fields['exitStatus'] = workflow.exitStatus
-    email_fields['errorMessage'] = (workflow.errorMessage ?: 'None')
-    email_fields['errorReport'] = (workflow.errorReport ?: 'None')
-    email_fields['commandLine'] = workflow.commandLine
-    email_fields['projectDir'] = workflow.projectDir
-    email_fields['summary'] = summary
-    email_fields['summary']['Date Started'] = workflow.start
-    email_fields['summary']['Date Completed'] = workflow.complete
-    email_fields['summary']['Pipeline script file path'] = workflow.scriptFile
-    email_fields['summary']['Pipeline script hash ID'] = workflow.scriptId
-    if(workflow.repository) email_fields['summary']['Pipeline repository Git URL'] = workflow.repository
-    if(workflow.commitId) email_fields['summary']['Pipeline repository Git Commit'] = workflow.commitId
-    if(workflow.revision) email_fields['summary']['Pipeline Git branch/tag'] = workflow.revision
-    email_fields['summary']['Nextflow Version'] = workflow.nextflow.version
-    email_fields['summary']['Nextflow Build'] = workflow.nextflow.build
-    email_fields['summary']['Nextflow Compile Timestamp'] = workflow.nextflow.timestamp
-
-    // Render the TXT template
-    def engine = new groovy.text.GStringTemplateEngine()
-    def tf = new File("$baseDir/assets/email_template.txt")
-    def txt_template = engine.createTemplate(tf).make(email_fields)
-    def email_txt = txt_template.toString()
-
-    // Render the HTML template
-    def hf = new File("$baseDir/assets/email_template.html")
-    def html_template = engine.createTemplate(hf).make(email_fields)
-    def email_html = html_template.toString()
-
-    // Render the sendmail template
-    def smail_fields = [ email: params.email, subject: subject, email_txt: email_txt, email_html: email_html, baseDir: "$baseDir" ]
-    def sf = new File("$baseDir/assets/sendmail_template.txt")
-    def sendmail_template = engine.createTemplate(sf).make(smail_fields)
-    def sendmail_html = sendmail_template.toString()
-
-    // Send the HTML e-mail
-    if (params.email) {
-        try {
-          if( params.plaintext_email ){ throw GroovyException('Send plaintext e-mail, not HTML') }
-          // Try to send HTML e-mail using sendmail
-          [ 'sendmail', '-t' ].execute() << sendmail_html
-          log.info "[nf-core/exomedepth] Sent summary e-mail to $params.email (sendmail)"
-        } catch (all) {
-          // Catch failures and try with plaintext
-          [ 'mail', '-s', subject, params.email ].execute() << email_txt
-          log.info "[nf-core/exomedepth] Sent summary e-mail to $params.email (mail)"
-        }
-    }
-
-    // Write summary e-mail HTML to a file
-    def output_d = new File( "${params.outdir}/Documentation/" )
-    if( !output_d.exists() ) {
-      output_d.mkdirs()
-    }
-    def output_hf = new File( output_d, "pipeline_report.html" )
-    output_hf.withWriter { w -> w << email_html }
-    def output_tf = new File( output_d, "pipeline_report.txt" )
-    output_tf.withWriter { w -> w << email_txt }
-
-    log.info "[nf-core/exomedepth] Pipeline Complete"
-
 }
