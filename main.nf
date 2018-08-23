@@ -64,8 +64,8 @@ params.target_bed = 'data/genes_hg19.bed'
 params.ref = 'data/test.fasta'
 target_bed = file(params.target_bed)
 ref = file(params.ref)
-//chrs = [1..22,'X']
-chrs = [ 'chr1', 'chr2', 'chrM' ]
+chrs = [1..22,'X']
+//chrs = [ 'chr1', 'chr2', 'chrM' ]
 params.transition_probability = 0.0001
 transition_probability = params.transition_probability
 
