@@ -87,6 +87,7 @@ params.bam_file_prefix="*"
 
 
 Channel.fromPath("${params.bam_folder}/${params.bam_file_prefix}*.bam").map{ file -> tuple(file.name, file) }.set{bamChannel}
+Channel.fromPath("${params.bam_folder}/${params.bam_file_prefix}*.bam.bai").map{ file -> tuple(file.name, file) }.set{baiChannel}
 
 
 // Header log info
@@ -116,6 +117,7 @@ process exomedepth{
     input:
     file target_bed from target_bed
     set val(name), file(bam) from bamChannel
+    set val(nameS), file(bai) from baiChannel
     each chr from chrs
     file ref
 
